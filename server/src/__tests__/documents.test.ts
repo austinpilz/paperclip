@@ -59,8 +59,12 @@ describe("document creation conflicts", () => {
     });
   });
 
-  it("preserves unrelated database failures", async () => {
-    const error = new Error("Failed query", { cause: { code: "23503" } });
+  it.each([
+    { code: "23503", constraint_name: "issue_documents_issue_id_issues_id_fk" },
+    { code: "23505", constraint_name: "document_revisions_document_revision_uq" },
+    { code: "23505", constraint_name: "issue_documents_document_uq" },
+  ])("preserves unrelated database failures ($constraint_name)", async (cause) => {
+    const error = new Error("Failed query", { cause });
     await expect(serviceWithTransactionError(error).upsertIssueDocument(input)).rejects.toBe(error);
   });
 });
