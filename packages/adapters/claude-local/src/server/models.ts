@@ -120,6 +120,44 @@ function isCustomGateway(baseUrl: string): boolean {
   return baseUrl !== DEFAULT_ANTHROPIC_BASE_URL;
 }
 
+/** True when the endpoint came from an agent's config rather than the server's own environment. */
+function isAgentScoped(ctx?: AdapterModelDiscoveryContext): boolean {
+  return ctx?.env !== undefined && Object.keys(ctx.env).length > 0;
+}
+
+/**
+ * Reject an endpoint the discovery request must never carry a credential to.
+ *
+ * Only the two checks that hold no matter who configured the endpoint: the
+ * request has to be plain HTTP or HTTPS, and it must not smuggle credentials in
+ * the authority. Destination policy — private ranges, instance metadata, DNS
+ * pinning — is deliberately not repeated here, because the server owns it and
+ * an operator may allowlist a LAN origin that this file cannot see.
+ */
+function isAddressableEndpoint(baseUrl: string): boolean {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") return false;
+  return endpoint.username === "" && endpoint.password === "";
+}
+
+/**
+ * Scheme and host only. One reason an endpoint is rejected is userinfo in the
+ * authority, so the raw string is exactly the thing that must stay out of logs.
+ */
+function redactEndpoint(baseUrl: string): string {
+  try {
+    const endpoint = new URL(baseUrl);
+    return `${endpoint.protocol}//${endpoint.host}`;
+  } catch {
+    return "<unparseable>";
+  }
+}
+
 function readModelEntries(payload: unknown): AdapterModel[] {
   const data = Array.isArray((payload as { data?: unknown })?.data) ? (payload as { data: unknown[] }).data : [];
   const models: AdapterModel[] = [];
@@ -208,15 +246,32 @@ async function loadClaudeModels(
 
   const now = Date.now();
   const baseUrl = resolveAnthropicBaseUrl(env);
+  if (!isAddressableEndpoint(baseUrl)) {
+    console.warn("[paperclip] Claude model discovery skipped an unusable endpoint", {
+      endpoint: redactEndpoint(baseUrl),
+    });
+    return fallback;
+  }
+  // An agent-configured gateway is caller-controlled, so it is only reachable
+  // through the egress-guarded transport the server supplies. Declining here
+  // keeps the credential off plain `fetch` if this adapter is ever driven
+  // without that transport; the server always pairs the two.
+  if (isAgentScoped(ctx) && isCustomGateway(baseUrl) && ctx?.fetch === undefined) {
+    console.warn("[paperclip] Claude model discovery needs a guarded fetch for an agent endpoint", {
+      endpoint: redactEndpoint(baseUrl),
+    });
+    return fallback;
+  }
+
   const cacheKey = `${baseUrl}|${fingerprint(apiKey)}`;
   const cached = cache.get(cacheKey);
   if (options?.forceRefresh !== true && cached && cached.expiresAt > now) {
     return cached.models;
   }
 
-  // An agent-scoped endpoint is caller-configured, so its request goes through
-  // the egress-guarded fetch the server supplies. Plain `fetch` is only reached
-  // for the server's own `process.env`, which is operator-controlled.
+  // Plain `fetch` is only reached for the server's own `process.env`, which is
+  // operator-controlled; the check above keeps every agent-scoped gateway on
+  // the guarded transport.
   const httpFetch = ctx?.fetch ?? fetch;
   const fetched = await fetchGatewayModels(apiKey, baseUrl, httpFetch);
   if (fetched.length > 0) {

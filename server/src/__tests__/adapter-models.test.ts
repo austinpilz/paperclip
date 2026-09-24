@@ -201,6 +201,13 @@ describe("adapter model listing", () => {
       ANTHROPIC_API_KEY: "sk-gateway",
     };
 
+    // The route never hands an adapter an agent env without the egress-guarded
+    // transport, and the adapter now refuses the pairing if it ever did. These
+    // cases are about catalog shape rather than egress, so they supply a guard
+    // that delegates to global `fetch` and let the spies below observe it.
+    const guardedFetch = ((...args: Parameters<typeof fetch>) => fetch(...args)) as typeof fetch;
+    const agentCtx = (env: Record<string, string>) => ({ env, fetch: guardedFetch });
+
     it("enumerates the agent's gateway when the server has no provider env", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
         ok: true,
@@ -213,7 +220,7 @@ describe("adapter model listing", () => {
       expect(await listAdapterModels("claude_local")).toEqual(claudeFallbackModels);
       expect(fetchSpy).not.toHaveBeenCalled();
 
-      const scoped = await listAdapterModels("claude_local", { env: gatewayEnv });
+      const scoped = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(fetchSpy.mock.calls[0]?.[0]).toBe("http://gateway.local:8317/v1/models");
@@ -226,7 +233,7 @@ describe("adapter model listing", () => {
         json: async () => ({ data: [{ id: "grok-4.6", owned_by: "xai" }] }),
       } as Response);
 
-      await listAdapterModels("claude_local", { env: gatewayEnv });
+      await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
       expect(headers.authorization).toBe("Bearer sk-gateway");
@@ -241,7 +248,7 @@ describe("adapter model listing", () => {
           json: async () => ({ data: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }] }),
         } as Response);
 
-      const models = await listAdapterModels("claude_local", { env: gatewayEnv });
+      const models = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       const headers = fetchSpy.mock.calls[1]?.[1]?.headers as Record<string, string>;
@@ -255,7 +262,7 @@ describe("adapter model listing", () => {
         json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
       } as Response);
 
-      const models = await listAdapterModels("claude_local", { env: gatewayEnv });
+      const models = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       expect(models.some((model) => model.id === "claude-opus-4-8")).toBe(false);
     });
@@ -266,9 +273,10 @@ describe("adapter model listing", () => {
         json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
       } as Response);
 
-      await listAdapterModels("claude_local", {
-        env: { ANTHROPIC_BASE_URL: "http://gateway.local:8317", ANTHROPIC_AUTH_TOKEN: "tok-123" },
-      });
+      await listAdapterModels(
+        "claude_local",
+        agentCtx({ ANTHROPIC_BASE_URL: "http://gateway.local:8317", ANTHROPIC_AUTH_TOKEN: "tok-123" }),
+      );
 
       const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
       expect(headers.authorization).toBe("Bearer tok-123");
@@ -285,12 +293,13 @@ describe("adapter model listing", () => {
           json: async () => ({ data: [{ id: "grok-4.6", owned_by: "xai" }] }),
         } as Response);
 
-      const first = await listAdapterModels("claude_local", { env: gatewayEnv });
-      const second = await listAdapterModels("claude_local", {
-        env: { ANTHROPIC_BASE_URL: "http://other.local:9000", ANTHROPIC_API_KEY: "sk-other" },
-      });
+      const first = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
+      const second = await listAdapterModels(
+        "claude_local",
+        agentCtx({ ANTHROPIC_BASE_URL: "http://other.local:9000", ANTHROPIC_API_KEY: "sk-other" }),
+      );
       // Re-reading the first gateway is served from cache, not a third fetch.
-      const firstAgain = await listAdapterModels("claude_local", { env: gatewayEnv });
+      const firstAgain = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       expect(first).toEqual([{ id: "kimi-k3", label: "kimi-k3 (kimi)" }]);
@@ -318,9 +327,10 @@ describe("adapter model listing", () => {
         json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
       } as Response);
 
-      const models = await listAdapterModels("claude_local", {
-        env: { ANTHROPIC_BASE_URL: "http://gateway.local:8317" },
-      });
+      const models = await listAdapterModels(
+        "claude_local",
+        agentCtx({ ANTHROPIC_BASE_URL: "http://gateway.local:8317" }),
+      );
 
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(models).toEqual(claudeFallbackModels);
@@ -335,7 +345,7 @@ describe("adapter model listing", () => {
         json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
       } as Response);
 
-      const models = await listAdapterModels("claude_local", { env: gatewayEnv });
+      const models = await listAdapterModels("claude_local", agentCtx(gatewayEnv));
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(models).toEqual([{ id: "kimi-k3", label: "kimi-k3 (kimi)" }]);
@@ -374,6 +384,53 @@ describe("adapter model listing", () => {
       expect(models).toEqual(claudeFallbackModels);
     });
 
+    it("refuses an agent gateway when no guarded fetch accompanies the agent env", async () => {
+      // The route always supplies the guard. If some other caller does not, the
+      // credential must not reach a caller-named host over plain fetch.
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
+      } as Response);
+
+      const models = await listAdapterModels("claude_local", { env: gatewayEnv });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(models).toEqual(claudeFallbackModels);
+    });
+
+    it("still discovers Anthropic's own API without a guarded fetch", async () => {
+      // Only a caller-named gateway needs the guard. The first-party endpoint is
+      // a constant in this file, so an agent that supplies just a key still works.
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }] }),
+      } as Response);
+
+      const models = await listAdapterModels("claude_local", { env: { ANTHROPIC_API_KEY: "sk-ant-agent" } });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe("https://api.anthropic.com/v1/models");
+      expect(models.some((model) => model.id === "claude-sonnet-4-6")).toBe(true);
+    });
+
+    it.each([
+      ["a non-HTTP scheme", "file:///etc/passwd"],
+      ["userinfo in the authority", "http://user:pass@gateway.local:8317"],
+    ])("never sends the credential to an endpoint with %s", async (_label, baseUrl) => {
+      const guarded = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ data: [{ id: "kimi-k3", owned_by: "kimi" }] }),
+      } as Response));
+
+      const models = await listAdapterModels("claude_local", {
+        env: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_API_KEY: "sk-gateway" },
+        fetch: guarded as unknown as typeof fetch,
+      });
+
+      expect(guarded).not.toHaveBeenCalled();
+      expect(models).toEqual(claudeFallbackModels);
+    });
+
     it("bounds the cache instead of retaining every historical gateway", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
         ok: true,
@@ -382,9 +439,10 @@ describe("adapter model listing", () => {
 
       // One more distinct endpoint than the cache holds, so the first is evicted.
       for (let index = 0; index < 33; index += 1) {
-        await listAdapterModels("claude_local", {
-          env: { ANTHROPIC_BASE_URL: `http://gateway-${index}.local`, ANTHROPIC_API_KEY: "sk-gateway" },
-        });
+        await listAdapterModels(
+          "claude_local",
+          agentCtx({ ANTHROPIC_BASE_URL: `http://gateway-${index}.local`, ANTHROPIC_API_KEY: "sk-gateway" }),
+        );
       }
       expect(fetchSpy).toHaveBeenCalledTimes(33);
 
@@ -396,13 +454,15 @@ describe("adapter model listing", () => {
 
       // The evicted endpoint re-fetches rather than serving a catalog the cache
       // should no longer be holding.
-      const evicted = await listAdapterModels("claude_local", {
-        env: { ANTHROPIC_BASE_URL: "http://gateway-0.local", ANTHROPIC_API_KEY: "sk-gateway" },
-      });
+      const evicted = await listAdapterModels(
+        "claude_local",
+        agentCtx({ ANTHROPIC_BASE_URL: "http://gateway-0.local", ANTHROPIC_API_KEY: "sk-gateway" }),
+      );
       // The most recent endpoint is still cached, so it does not re-fetch.
-      const retained = await listAdapterModels("claude_local", {
-        env: { ANTHROPIC_BASE_URL: "http://gateway-32.local", ANTHROPIC_API_KEY: "sk-gateway" },
-      });
+      const retained = await listAdapterModels(
+        "claude_local",
+        agentCtx({ ANTHROPIC_BASE_URL: "http://gateway-32.local", ANTHROPIC_API_KEY: "sk-gateway" }),
+      );
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(evicted).toEqual([{ id: "grok-4.6", label: "grok-4.6 (xai)" }]);
