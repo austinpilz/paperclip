@@ -193,7 +193,7 @@ async function fetchModelList(
     return readModelEntries(await response.json());
   } catch (error) {
     console.warn("[paperclip] Claude model discovery failed", {
-      url,
+      endpoint: redactEndpoint(url),
       error: error instanceof Error ? error.message : String(error),
     });
     return [];
