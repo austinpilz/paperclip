@@ -24,15 +24,46 @@ const BEDROCK_MODELS: AdapterModel[] = [
   { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Bedrock Haiku 4.5" },
 ];
 
+/**
+ * Cap on distinct endpoint/credential pairs held at once. A Paperclip instance
+ * runs far fewer gateways than this, so the bound only ever trims entries left
+ * behind by a gateway change or a credential rotation.
+ */
+const MODELS_CACHE_MAX_ENTRIES = 32;
+
 const cache = new Map<string, { expiresAt: number; models: AdapterModel[] }>();
 
 /**
- * Environment seen by discovery: the agent's own `adapterConfig.env` wins over
- * the server's `process.env`, so an agent pointed at a gateway enumerates that
- * gateway rather than whatever the Paperclip host happens to be configured for.
+ * Record a catalog, dropping entries that are expired or oldest-first over the
+ * bound. Without this the map keeps one array per historical base-URL and
+ * credential pair for the lifetime of the process.
+ */
+function cacheModels(key: string, expiresAt: number, models: AdapterModel[], now: number): void {
+  for (const [existingKey, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(existingKey);
+  }
+  // Re-inserting moves the key to the end, so the iteration order stays
+  // least-recently-written first and the eviction below takes the right entry.
+  cache.delete(key);
+  cache.set(key, { expiresAt, models });
+  while (cache.size > MODELS_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+/**
+ * Environment seen by discovery.
+ *
+ * An agent context replaces `process.env` outright rather than layering over
+ * it. Merging would let an agent that sets only `ANTHROPIC_BASE_URL` pair its
+ * own endpoint with the server's ambient `ANTHROPIC_API_KEY`, which sends a
+ * first-party Anthropic credential to a third-party gateway. The endpoint and
+ * the credential must come from one scope.
  */
 function discoveryEnv(ctx?: AdapterModelDiscoveryContext): Record<string, string | undefined> {
-  return ctx?.env && Object.keys(ctx.env).length > 0 ? { ...process.env, ...ctx.env } : process.env;
+  return ctx?.env && Object.keys(ctx.env).length > 0 ? ctx.env : process.env;
 }
 
 function isBedrockEnv(env: Record<string, string | undefined>): boolean {
@@ -114,11 +145,12 @@ function readModelEntries(payload: unknown): AdapterModel[] {
 async function fetchModelList(
   url: string,
   headers: Record<string, string>,
+  httpFetch: typeof fetch,
 ): Promise<AdapterModel[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ANTHROPIC_MODELS_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { headers, signal: controller.signal });
+    const response = await httpFetch(url, { headers, signal: controller.signal });
     if (!response.ok) return [];
     return readModelEntries(await response.json());
   } catch (error) {
@@ -149,13 +181,17 @@ async function fetchModelList(
  * gateways that only speak that dialect. Unioning the two is deliberately
  * avoided — it duplicates the whole catalog under unreadable alias IDs.
  */
-async function fetchGatewayModels(apiKey: string, baseUrl: string): Promise<AdapterModel[]> {
+async function fetchGatewayModels(
+  apiKey: string,
+  baseUrl: string,
+  httpFetch: typeof fetch,
+): Promise<AdapterModel[]> {
   const url = `${baseUrl}${ANTHROPIC_MODELS_ENDPOINT}`;
   const fetchAnthropicDialect = () =>
-    fetchModelList(url, { "anthropic-version": ANTHROPIC_API_VERSION, "x-api-key": apiKey });
+    fetchModelList(url, { "anthropic-version": ANTHROPIC_API_VERSION, "x-api-key": apiKey }, httpFetch);
   if (!isCustomGateway(baseUrl)) return fetchAnthropicDialect();
 
-  const openaiDialect = await fetchModelList(url, { authorization: `Bearer ${apiKey}` });
+  const openaiDialect = await fetchModelList(url, { authorization: `Bearer ${apiKey}` }, httpFetch);
   return openaiDialect.length > 0 ? openaiDialect : await fetchAnthropicDialect();
 }
 
@@ -178,12 +214,16 @@ async function loadClaudeModels(
     return cached.models;
   }
 
-  const fetched = await fetchGatewayModels(apiKey, baseUrl);
+  // An agent-scoped endpoint is caller-configured, so its request goes through
+  // the egress-guarded fetch the server supplies. Plain `fetch` is only reached
+  // for the server's own `process.env`, which is operator-controlled.
+  const httpFetch = ctx?.fetch ?? fetch;
+  const fetched = await fetchGatewayModels(apiKey, baseUrl, httpFetch);
   if (fetched.length > 0) {
     // A gateway's catalog is authoritative: appending Anthropic's first-party
     // model IDs there would offer models the gateway cannot route.
     const models = isCustomGateway(baseUrl) ? fetched : mergedWithFallback(fetched);
-    cache.set(cacheKey, { expiresAt: now + ANTHROPIC_MODELS_CACHE_TTL_MS, models });
+    cacheModels(cacheKey, now + ANTHROPIC_MODELS_CACHE_TTL_MS, models, now);
     return models;
   }
 

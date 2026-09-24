@@ -123,6 +123,7 @@ import {
   refreshAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
+import { createModelDiscoveryFetch } from "../adapters/model-discovery-fetch.js";
 import {
   REDACTED_EVENT_VALUE,
   redactAgentAdapterConfig,
@@ -2358,6 +2359,15 @@ export function agentRoutes(
    * self-hosted CLIProxyAPI/LiteLLM gateway) rather than the Paperclip server's
    * ambient environment. Returns undefined when no agent is named or the agent
    * contributes nothing relevant, which preserves the pre-existing behaviour.
+   *
+   * Naming an agent here resolves that agent's provider credential and spends
+   * it on an outbound request, so the caller must be entitled to it. A user or
+   * board caller with company access already administers every agent in the
+   * company, and reads this catalog to configure them. An agent caller does
+   * not: Paperclip gives one agent no claim on another agent's credential, so
+   * an agent may only name itself. A rejected pairing falls back to the
+   * server's own environment rather than erroring, which keeps the response
+   * free of any signal about the named agent.
    */
   async function buildModelDiscoveryContext(
     req: Request,
@@ -2374,6 +2384,9 @@ export function agentRoutes(
     }
     if (!agent || agent.companyId !== companyId) return undefined;
 
+    const actor = getActorInfo(req);
+    if (actor.actorType === "agent" && actor.agentId !== agent.id) return undefined;
+
     const agentEnv = parseObject((agent.adapterConfig as Record<string, unknown> | null)?.env);
     const discoveryBindings = Object.fromEntries(
       Object.entries(agentEnv).filter(([key]) => MODEL_DISCOVERY_ENV_KEYS.includes(key)),
@@ -2386,7 +2399,9 @@ export function agentRoutes(
         discoveryBindings,
         buildActorSecretContext(req, { consumerType: "agent", consumerId: agent.id }),
       );
-      return Object.keys(env).length > 0 ? { env } : undefined;
+      // The endpoint in this env is agent-configured, so discovery dials it
+      // through the guarded transport instead of plain fetch.
+      return Object.keys(env).length > 0 ? { env, fetch: createModelDiscoveryFetch() } : undefined;
     } catch (err) {
       console.warn("[paperclip] Model discovery env resolution failed", {
         agentId: agent.id,

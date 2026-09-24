@@ -220,6 +220,13 @@ export const queryKeys = {
     keys: (agentId: string) => ["agents", "keys", agentId] as const,
     configRevisions: (agentId: string) =>
       ["agents", "config-revisions", agentId] as const,
+    /**
+     * Prefix for every adapter-model catalog held for a company. Discovery
+     * depends on an agent's saved provider environment, so a config save
+     * invalidates through this prefix instead of naming one exact key.
+     */
+    adapterModelsForCompany: (companyId: string) =>
+      ["agents", companyId, "adapter-models"] as const,
     adapterModels: (
       companyId: string,
       adapterType: string,

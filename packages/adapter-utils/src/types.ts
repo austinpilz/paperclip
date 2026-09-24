@@ -462,8 +462,23 @@ export interface AcpTargetDescriptor {
  * actually run against.
  */
 export interface AdapterModelDiscoveryContext {
-  /** Agent `adapterConfig.env` with secret refs already materialized. */
+  /**
+   * Agent `adapterConfig.env` with secret refs already materialized.
+   *
+   * An adapter must read this instead of `process.env`, never layered over it.
+   * Merging the two pairs an agent's endpoint with the server's credential.
+   */
   env?: Record<string, string>;
+  /**
+   * Egress-guarded `fetch` for any request to an endpoint named by `env`.
+   *
+   * That endpoint is caller-configured, so an unguarded request would let an
+   * agent config aim a credentialed server-side call at loopback, an RFC 1918
+   * host, or cloud instance metadata. The server supplies a fetch that applies
+   * its remote-HTTP endpoint policy and pins DNS answers against rebinding.
+   * An adapter must use it whenever `env` is present.
+   */
+  fetch?: typeof globalThis.fetch;
 }
 
 export interface ServerAdapterModule {

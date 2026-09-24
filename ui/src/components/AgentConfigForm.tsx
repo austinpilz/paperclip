@@ -557,6 +557,22 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     setEnvironmentEditorKey(key => key + 1);
   }, []);
 
+  /**
+   * Drop every cached adapter-model catalog for this company.
+   *
+   * The catalog is discovered from the agent's saved provider environment, so a
+   * save that repoints `ANTHROPIC_BASE_URL` or rotates its key leaves the old
+   * gateway's models on screen until the query happens to go stale. Invalidate
+   * by prefix: the full key also carries the environment, the provider and the
+   * agent, and a save can move any of them.
+   */
+  const invalidateAdapterModels = useCallback(() => {
+    if (!selectedCompanyId) return;
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.agents.adapterModelsForCompany(selectedCompanyId),
+    });
+  }, [queryClient, selectedCompanyId]);
+
   const handleSave = useCallback(async () => {
     if (isCreate) return;
     const flushedEnv = flushEnvironmentDraft();
@@ -571,7 +587,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       : overlay;
     if (!isOverlayDirty(nextOverlay)) return;
     await props.onSave(buildAgentUpdatePatch(props.agent, nextOverlay));
-  }, [isCreate, isDirty, overlay, props]);
+    invalidateAdapterModels();
+  }, [isCreate, isDirty, overlay, props, invalidateAdapterModels]);
 
   useEffect(() => {
     if (!isCreate) {
@@ -727,6 +744,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       backgroundSaveInFlightRef.current = false;
     }
     invalidateUserSecretDefinitions();
+    // The login just bound a credential into the agent's environment, which is
+    // an input to model discovery.
+    invalidateAdapterModels();
   };
 
   // Create mode: bind the fixed reference to an existing stored login with no new
